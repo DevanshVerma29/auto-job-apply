@@ -402,16 +402,16 @@ def get_function_schema(
         required, param_annotations, default_values=default_values
     )
 
-    function = ToolFunction(
-        function=Function(
-            description=description,
-            name=fname,
-            parameters=parameters,
-            strict=True,
-        )
-    )
-
-    schema = model_dump(function)
+    # Claude tool format
+    schema = {
+        "name": fname,
+        "description": description,
+        "input_schema": {
+            "type": "object",
+            "properties": parameters.properties,
+            "required": parameters.required,
+        },
+    }
 
     return schema
 

@@ -4,8 +4,11 @@ from typing import Callable, List  # noqa: UP035
 
 from playwright.async_api import Page
 
-# Create an event loop
-loop = asyncio.get_event_loop()
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
 DOM_change_callback: List[Callable[[str], None]] = []
 

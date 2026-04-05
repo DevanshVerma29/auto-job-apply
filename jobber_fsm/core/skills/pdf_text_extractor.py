@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlparse
 
 import httpx
 import pdfplumber
@@ -89,9 +90,13 @@ async def download_pdf(pdf_url: str, file_path: str) -> str:
     returns: str - The file path of the downloaded PDF if successful, otherwise an error message.
     raises: Exception - If an error occurs during the download process.
     """
+    parsed = urlparse(pdf_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsafe URL scheme: {parsed.scheme}. Only http/https allowed.")
+
     try:
         logger.info(f"Downloading PDF from: {pdf_url} to: {file_path}")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.get(pdf_url)
             response.raise_for_status()  # Ensure the request was successful
         with open(file_path, "wb") as pdf_file:

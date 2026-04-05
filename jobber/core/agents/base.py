@@ -1,8 +1,7 @@
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import litellm
-import openai
+import anthropic
 from dotenv import load_dotenv
 
 from jobber.core.skills.get_screenshot import get_screenshot
@@ -19,13 +18,12 @@ class BaseAgent:
     ):
         load_dotenv()
         self.name = self.__class__.__name__
-        self.messages = [{"role": "system", "content": system_prompt}]
+        self.system_prompt = system_prompt
+        self.messages = []
         self.tools_list = []
         self.executable_functions_list = {}
-        self.llm_config = {"model": "gpt-4o-mini"}
         if tools:
             self._initialize_tools(tools)
-            self.llm_config.update({"tools": self.tools_list, "tool_choice": "auto"})
 
     def _initialize_tools(self, tools: List[Tuple[Callable, str]]):
         for function, description in tools:
@@ -41,57 +39,56 @@ class BaseAgent:
         processed_messages = self._process_messages(self.messages)
         self.messages = processed_messages
 
+        client = anthropic.Anthropic()
+
         while True:
-            litellm.logging = False
-            litellm.success_callback = ["langsmith"]
-            # litellm.set_verbose = True
-            try:
-                response = litellm.completion(
-                    messages=self.messages,
-                    **self.llm_config,
-                    metadata={
-                        "run_name": f"{self.name}Run",
-                    },
-                )
-            except openai.BadRequestError as e:
-                should_retry = litellm._should_retry(e.status_code)
-                print(f"should_retry: {should_retry}")
+            kwargs = {
+                "model": "claude-opus-4-6",
+                "max_tokens": 4096,
+                "system": self.system_prompt,
+                "messages": self.messages,
+            }
+            if self.tools_list:
+                kwargs["tools"] = self.tools_list
+                kwargs["tool_choice"] = {"type": "auto"}
 
-            response_message = response.choices[0].message
-            tool_calls = response_message.tool_calls
+            response = client.messages.create(**kwargs)
 
-            if tool_calls:
-                self.messages.append(response_message)
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_to_call = self.executable_functions_list[function_name]
-                    function_args = json.loads(tool_call.function.arguments)
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+
+            if tool_use_blocks:
+                # Append assistant turn
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [b.model_dump() for b in response.content],
+                })
+
+                tool_results = []
+                for tool_use in tool_use_blocks:
+                    function_name = tool_use.name
+                    function_to_call = self.executable_functions_list.get(function_name)
                     try:
-                        function_response = await function_to_call(**function_args)
-                        self.messages.append(
-                            {
-                                "tool_call_id": tool_call.id,
-                                "role": "tool",
-                                "name": function_name,
-                                "content": str(function_response),
-                            }
-                        )
+                        function_response = await function_to_call(**tool_use.input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": str(function_response),
+                        })
                     except Exception as e:
                         logger.info(f"***** Error occurred: {str(e)}")
-                        self.messages.append(
-                            {
-                                "tool_call_id": tool_call.id,
-                                "role": "tool",
-                                "name": function_name,
-                                "content": str(
-                                    "The tool responded with an error, please try again with a diffrent tool or modify the parameters of the tool",
-                                    function_response,
-                                ),
-                            }
-                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": "The tool responded with an error, please try again with a different tool or modify the parameters of the tool",
+                        })
+
+                self.messages.append({"role": "user", "content": tool_results})
                 continue
 
-            content = response_message.content
+            # Text response
+            text_blocks = [b for b in response.content if b.type == "text"]
+            content = text_blocks[0].text if text_blocks else ""
+
             if "##TERMINATE TASK##" in content or "## TERMINATE TASK ##" in content:
                 return {
                     "terminate": True,
@@ -110,8 +107,6 @@ class BaseAgent:
                             "terminate": False,
                             "content": extracted_response.get("next_step"),
                         }
-                # handling the case when browser nav does not send ##TERMINATE TASK## in its response. We will get an error in extract_json function which we are catching here
-                # we still return terminate true and send the message as is to the planner
                 except Exception as e:
                     logger.info(
                         f"navigator did not send ##Terminate task## error - {e} & content - {content}"
@@ -133,6 +128,11 @@ class BaseAgent:
     async def process_query(self, query: str) -> Dict[str, Any]:
         try:
             screenshot = await get_screenshot()
+            # Claude image format
+            image_data = screenshot
+            if screenshot.startswith("data:image/"):
+                image_data = screenshot.split(",", 1)[1]
+
             return await self.generate_reply(
                 [
                     {
@@ -143,11 +143,14 @@ class BaseAgent:
                                 "text": f"{query} \nHere is a screenshot of the current browser page",
                             },
                             {
-                                "type": "image_url",
-                                "image_url": {"url": f"{screenshot}"},
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": image_data,
+                                },
                             },
                         ],
-                        # "content": query,
                     }
                 ],
                 None,
@@ -157,12 +160,11 @@ class BaseAgent:
             return {"terminate": True, "content": f"Error: {str(e)}"}
 
     def reset_messages(self):
-        self.messages = [self.messages[0]]  # Keep the system message
+        self.messages = []
 
     def _process_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         processed_messages = []
 
-        # find the latest user message in the messages array
         last_user_message_index = next(
             (
                 i
@@ -172,7 +174,6 @@ class BaseAgent:
             -1,
         )
 
-        # remove image and the supporting text of "Here is a screenshot of the current browser page" from previous messages
         for i, message in enumerate(messages):
             if message["role"] == "user":
                 if isinstance(message.get("content"), list):
@@ -180,7 +181,6 @@ class BaseAgent:
                     for item in message["content"]:
                         if item["type"] == "text":
                             if i != last_user_message_index:
-                                # Remove the screenshot text if it's not the last user message
                                 item["text"] = (
                                     item["text"]
                                     .replace(
@@ -190,17 +190,9 @@ class BaseAgent:
                                     .strip()
                                 )
                             new_content.append(item)
-                        elif (
-                            item["type"] == "image_url" and i == last_user_message_index
-                        ):
+                        elif item["type"] == "image" and i == last_user_message_index:
                             new_content.append(item)
                     message["content"] = new_content
             processed_messages.append(message)
-
-        # Ensure the system message is always included
-        if processed_messages and processed_messages[0]["role"] != "system":
-            system_message = next((m for m in messages if m["role"] == "system"), None)
-            if system_message:
-                processed_messages.insert(0, system_message)
 
         return processed_messages

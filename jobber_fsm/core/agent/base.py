@@ -1,18 +1,14 @@
 import json
 from typing import Callable, List, Optional, Tuple, Type
 
-import litellm
-import openai
-from langsmith.wrappers import wrap_openai
+import anthropic
+from dotenv import load_dotenv
 from pydantic import BaseModel
-
 
 from jobber_fsm.utils.function_utils import get_function_schema
 from jobber_fsm.utils.logger import logger
 
-# Set global configurations for litellm
-litellm.logging = False
-litellm.success_callback = ["langsmith"]
+load_dotenv()
 
 
 class BaseAgent:
@@ -25,29 +21,20 @@ class BaseAgent:
         tools: Optional[List[Tuple[Callable, str]]] = None,
         keep_message_history: bool = True,
     ):
-        # Metdata
         self.name = name
-
-        # Messages
         self.system_prompt = system_prompt
         self._initialize_messages()
         self.keep_message_history = keep_message_history
 
-        # Input-output format
         self.input_format = input_format
         self.output_format = output_format
 
-        # Llm client
-        self.client = wrap_openai(openai.Client())
-        # TODO: use lite llm here.
-        # self.llm_config = {"model": "gpt-4o-2024-08-06"}
+        self.client = anthropic.Anthropic()
 
-        # Tools
         self.tools_list = []
         self.executable_functions_list = {}
         if tools:
             self._initialize_tools(tools)
-            # self.llm_config.update({"tools": self.tools_list, "tool_choice": "auto"})
 
     def _initialize_tools(self, tools: List[Tuple[Callable, str]]):
         for func, func_desc in tools:
@@ -55,13 +42,27 @@ class BaseAgent:
             self.executable_functions_list[func.__name__] = func
 
     def _initialize_messages(self):
-        self.messages = [{"role": "system", "content": self.system_prompt}]
+        self.messages = []
+
+    def _build_output_tool(self) -> dict:
+        """Build a Claude tool definition for structured output from the output_format pydantic model."""
+        schema = self.output_format.model_json_schema()
+        # Remove title from top-level and nested definitions
+        schema.pop("title", None)
+        return {
+            "name": "structured_output",
+            "description": f"Return the final structured response as {self.output_format.__name__}",
+            "input_schema": schema,
+        }
+
+    def _convert_messages_for_claude(self, messages: list) -> list:
+        """Convert messages to Claude format (no system role in messages array)."""
+        return [m for m in messages if m.get("role") != "system"]
 
     async def run(self, input_data: BaseModel, screenshot: str = None) -> BaseModel:
         if not isinstance(input_data, self.input_format):
             raise ValueError(f"Input data must be of type {self.input_format.__name__}")
 
-        # Handle message history.
         if not self.keep_message_history:
             self._initialize_messages()
 
@@ -70,76 +71,98 @@ class BaseAgent:
                 {"role": "user", "content": input_data.model_dump_json()}
             )
         else:
+            # Claude image format: strip the data URL prefix
+            image_data = screenshot
+            if screenshot.startswith("data:image/"):
+                image_data = screenshot.split(",", 1)[1]
+
             self.messages.append(
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": input_data.model_dump_json()},
-                        {"type": "image_url", "image_url": {"url": f"{screenshot}"}},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": image_data,
+                            },
+                        },
                     ],
                 }
             )
 
-        # print(self.messages)
+        output_tool = self._build_output_tool()
+        all_tools = self.tools_list + [output_tool]
 
-        # TODO: add a max_turn here to prevent a inifinite fallout
         while True:
-            # TODO:
-            # 1. replace this with litellm post structured json is supported.
-            # 2. exeception handling while calling the client
             if len(self.tools_list) == 0:
-                response = self.client.beta.chat.completions.parse(
-                    model="gpt-4o-2024-08-06",
-                    messages=self.messages,
-                    response_format=self.output_format,
-                )
+                # Force structured output via the output tool
+                tool_choice = {"type": "tool", "name": "structured_output"}
             else:
-                # print(self.tools_list)
-                response = self.client.beta.chat.completions.parse(
-                    model="gpt-4o-2024-08-06",
-                    messages=self.messages,
-                    response_format=self.output_format,
-                    tool_choice="auto",
-                    tools=self.tools_list,
-                )
-            response_message = response.choices[0].message
-            # print(response_message)
-            tool_calls = response_message.tool_calls
+                tool_choice = {"type": "auto"}
 
-            if tool_calls:
-                self.messages.append(response_message)
-                for tool_call in tool_calls:
-                    await self._append_tool_response(tool_call)
-                continue
+            response = self.client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                system=self.system_prompt,
+                messages=self._convert_messages_for_claude(self.messages),
+                tools=all_tools,
+                tool_choice=tool_choice,
+            )
 
-            parsed_response_content: self.output_format = response_message.parsed
-            return parsed_response_content
+            # Check for tool use blocks
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
-    async def _append_tool_response(self, tool_call):
-        function_name = tool_call.function.name
-        function_to_call = self.executable_functions_list[function_name]
-        function_args = json.loads(tool_call.function.arguments)
+            if not tool_use_blocks:
+                # No tool calls — shouldn't happen with tool_choice forced, but handle gracefully
+                text_blocks = [b for b in response.content if b.type == "text"]
+                text = text_blocks[0].text if text_blocks else ""
+                return self.output_format.model_validate_json(text)
+
+            # Append assistant message with all content blocks
+            self.messages.append({
+                "role": "assistant",
+                "content": [b.model_dump() for b in response.content],
+            })
+
+            # Process each tool use block
+            tool_results = []
+            hit_structured_output = False
+            parsed_response = None
+
+            for tool_use in tool_use_blocks:
+                if tool_use.name == "structured_output":
+                    parsed_response = self.output_format(**tool_use.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": "Output accepted.",
+                    })
+                    hit_structured_output = True
+                else:
+                    # Execute browser/other tool
+                    result = await self._call_tool(tool_use)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": str(result),
+                    })
+
+            self.messages.append({"role": "user", "content": tool_results})
+
+            if hit_structured_output:
+                return parsed_response
+
+    async def _call_tool(self, tool_use) -> str:
+        function_name = tool_use.name
+        function_to_call = self.executable_functions_list.get(function_name)
+        if not function_to_call:
+            return f"Unknown tool: {function_name}"
         try:
-            function_response = await function_to_call(**function_args)
-            # print(function_response)
-            self.messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": str(function_response),
-                }
-            )
+            result = await function_to_call(**tool_use.input)
+            return result
         except Exception as e:
-            logger.info(f"Error occurred calling the tool {function_name}: {str(e)}")
-            self.messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": str(
-                        "The tool responded with an error, please try again with a different tool or modify the parameters of the tool",
-                        function_response,
-                    ),
-                }
-            )
+            logger.info(f"Error calling tool {function_name}: {str(e)}")
+            return f"Tool error: {str(e)}"

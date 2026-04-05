@@ -5,3 +5,5 @@ log_files/
 logs/
 .DS_STORE
 results/
+temp/
+**/user_preferences/user_preferences.txt
