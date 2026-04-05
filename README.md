@@ -1,110 +1,113 @@
-# sentient
+# auto-job-apply
 
-this agent is based on our upcoming open-source framework [sentient](https://github.com/sentient-engineering/sentient) to help devs instantly build fast & reliable AI agents that can control browsers autonomously in 3 lines of code. checkout the beta sentient package on [pypi](https://pypi.org/project/sentient/) & our experiemnts to advance oss web navigating agents in the [agent-q repository](https://github.com/sentient-engineering/agent-q)
+AI agent that autonomously searches and applies to jobs on your behalf using browser automation, powered by Claude.
 
-# jobber - apply to relevant jobs on internet autonomously
+---
 
-jobber is an ai agent that searches and applies for jobs on your behalf by controlling your browser. put in your resume and preferences and it does the work in background.
-
-### demo
-
-checkout this [loom video](https://www.loom.com/share/2037ee751b4f491c8d2ffd472d8223bd?sid=53d08a9f-5a9b-4388-ae69-445032b31738) for a quick demo
-
-### jobber and jobber_fsm
-
-you might notice two separate implementations of jobber in the repo. `jobber` folder contains a simpler approach to implementing multi-agent conversation required between a planner and a browser agent.
-
-the `jobber_fsm` folder contains another approach based on [finite state machines](https://github.com/sentient-engineering/multi-agent-fsm). there are slight nuances and both result in similar level or performace. however, the fsm approach is more scalable, and we will be doing further improvements in it.
-
-the downside of fsm agent is that it is dependent on [structured output](https://openai.com/index/introducing-structured-outputs-in-the-api/) from open ai. so you can't reliably use cheaper models like gpt4o-mini or other oss models which is possible in `jobber`
-
-### setup
-
-1. we recommend installing poetry before proceeding with the next steps. you can install poetry using these [instructions](https://python-poetry.org/docs/#installation)
-
-2. install dependencies
+## Quick Start
 
 ```bash
-poetry install
-```
+# 1. Clone and enter the repo
+git clone https://github.com/DevanshVerma29/auto-job-apply.git
+cd auto-job-apply
 
-3. start chrome in dev mode - in a seaparate terminal, use the command to start a chrome instance and do necesssary logins to job websites like linkedin/ wellfound, etc.
+# 2. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate        # macOS/Linux
+# .venv\Scripts\activate         # Windows
 
-for mac, use command -
+# 3. Install dependencies
+pip install -r requirements.txt
 
-```bash
-sudo /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
-```
+# 4. Install Playwright browser drivers
+playwright install chromium
 
-for linux -
+# 5. Add your Anthropic API key
+echo 'ANTHROPIC_API_KEY="your-key-here"' > .env
 
-```bash
-google-chrome --remote-debugging-port=9222
-```
+# 6. Fill in your personal info and resume path
+nano jobber_fsm/user_preferences/user_preferences.txt
 
-for windows -
+# 7. In a SEPARATE terminal — quit Chrome fully first, then launch it in debug mode
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-debug-profile
 
-```bash
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
-
-4. set up env - add openai and [langsmith](https://smith.langchain.com) keys to .env file. you can refer .env.example. currently adding langsmith is required but if you do not want to use it for tracing - then you can comment the line `litellm.success_callback = ["langsmith"]` in the `./jobber_fsm/core/agent/base.py` file.
-
-5. update your preferences in the `user_preferences.txt` file in the folder of agent that you are running (jobber/ jobber_fsm). provide the local file path to your resume in this file itself for the agent to be able to upload it.
-
-6. run the agent - jobber_fsm or jobber
-
-```bash
+# 8. Back in your main terminal — run the agent
 python -u -m jobber_fsm
 ```
 
-or
-
-```bash
-python -u -m jobber
+When prompted, enter a task like:
+```
+Search for Content Designer jobs on LinkedIn in India (remote, Gurgaon, Delhi, Bangalore). Apply to the first relevant listing using resume at /path/to/resume.pdf
 ```
 
-6. enter your task. sample task -
+---
 
-```bash
-apply for a backend engineer role based in helsinki on linkedin
-```
+## Prerequisites
 
-### Run evals
+- **Python 3.8+** (3.14 supported — all deps compatible)
+- **pip**
+- **Google Chrome**
+- **Anthropic API key** with credits — [console.anthropic.com](https://console.anthropic.com/)
 
-1. For Jobber
+---
 
-```bash
- python -m test.tests_processor --orchestrator_type vanilla
-```
+## user_preferences.txt
 
-2. For Jobber FSM
-
-```bash
- python -m test.tests_processor --orchestrator_type fsm
-```
-
-#### citations
-
-a bunch of amazing work in the space has inspired this. see [webvoyager](https://arxiv.org/abs/2401.13919), [agent-e](https://arxiv.org/abs/2407.13032)
+Located at `jobber_fsm/user_preferences/user_preferences.txt`. Fill in your details before running:
 
 ```
-@article{he2024webvoyager,
-  title={WebVoyager: Building an End-to-End Web Agent with Large Multimodal Models},
-  author={He, Hongliang and Yao, Wenlin and Ma, Kaixin and Yu, Wenhao and Dai, Yong and Zhang, Hongming and Lan, Zhenzhong and Yu, Dong},
-  journal={arXiv preprint arXiv:2401.13919},
-  year={2024}
-}
+Personal Info:
+First Name: Your Name
+Last Name: Your Last Name
+Email: you@example.com
+Phone Number: +91 XXXXXXXXXX
+Address: City, Country
+Occupation: Your Role
+
+Resume File to Upload Path = /absolute/path/to/your/resume.pdf
+
+Skills:
+...
+
+Work Experience:
+...
 ```
 
-```
-@misc{abuelsaad2024-agente,
-      title={Agent-E: From Autonomous Web Navigation to Foundational Design Principles in Agentic Systems},
-      author={Tamer Abuelsaad and Deepak Akkil and Prasenjit Dey and Ashish Jagmohan and Aditya Vempaty and Ravi Kokku},
-      year={2024},
-      eprint={2407.13032},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2407.13032},
-}
-```
+> This file is gitignored — your personal info will not be committed.
+
+---
+
+## How it works
+
+The repo has two implementations:
+
+- **`jobber_fsm`** — Finite state machine approach. More scalable, recommended.
+- **`jobber`** — Simpler multi-agent conversation model.
+
+Both use Claude (`claude-opus-4-6`) as the LLM and Playwright for browser control. The planner agent breaks down your task into steps, and the browser agent executes each step autonomously.
+
+---
+
+## Notes
+
+- **Chrome must be quit completely** before launching in debug mode — if it's already open, the debug flag will be ignored and the agent won't connect
+- The `--user-data-dir` flag is required — without it Chrome won't bind the debug port
+- Run Chrome in a **separate terminal** and keep it open while the agent is running
+- The agent takes input interactively — do not pipe commands via `echo |` (causes EOF loop)
+- Anthropic API credits are required — a free-tier key with no balance will fail at runtime
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `Could not resolve authentication method` | `.env` file missing or `ANTHROPIC_API_KEY` not set |
+| `Your credit balance is too low` | Add credits at console.anthropic.com/settings/billing |
+| `Opening in existing browser session` | Quit Chrome fully (Cmd+Q), then relaunch with the debug flags |
+| `DevTools requires a non-default data directory` | Add `--user-data-dir=/tmp/chrome-debug-profile` to the Chrome launch command |
+| Port 9222 not open | Verify with `lsof -i :9222` — if empty, Chrome didn't launch correctly |
+| `EOF when reading a line` (endless loop) | Don't pipe input — run interactively and type the command manually |
+| Import errors | Re-run `pip install -r requirements.txt` inside your venv |
